@@ -1,7 +1,8 @@
-/*
+/* 
 PATH: /js/soundboard.js
 FILE: soundboard.js
-PURPOSE: Medical Sound Pad logic — per-group boards with selectable colors, per-group Kit Editor, per-pad sampling & mic record, optional per-pad image, sentence builder (single track) with scenes & story chain, save/load (incl. sentences & images). Adds “Vocabulary → Pad” picker inside Kit Editor rows (uses local vocabulary saved by the on-screen keyboard). Phrase defaults to pad name when blank. No other layout changes.
+PURPOSE: Medical Sound Pad logic — per-group boards with selectable colors, per-group Kit Editor, per-pad sampling & mic record, optional per-pad image, sentence builder (single track) with scenes & story chain, save/load (incl. sentences & images). 
+Update: **TTS fallback now works on both Sentence Play and immediate Pad Press** (if pad has no sample and “TTS if empty” is checked). No layout changes.
 Created by Scott Russo.
 */
 (function(){
@@ -23,6 +24,19 @@ Created by Scott Russo.
     let h = hex.replace('#',''); if (h.length===3){ h = h.split('').map(x=>x+x).join(''); }
     const n = parseInt(h,16); const r = (n>>16)&255, g=(n>>8)&255, b=n&255;
     return `${r},${g},${b}`;
+  }
+
+  // ---- TTS helper (used for sentence play and pad-press fallback) ----
+  function ttsSpeak(text, gapMs){
+    return new Promise((res)=>{
+      if (!('speechSynthesis' in window)){ res(); return; }
+      const s = (text||'').trim(); if (!s){ res(); return; }
+      try{ window.speechSynthesis.cancel(); }catch(_){}
+      const utt = new SpeechSynthesisUtterance(s);
+      utt.rate = 1.0; utt.pitch = 1.0;
+      utt.onend = ()=> setTimeout(res, Math.max(0, Number(gapMs)||0));
+      try{ window.speechSynthesis.speak(utt); }catch(_){ res(); }
+    });
   }
 
   /* Local vocabulary (shared key with keyboard) */
@@ -362,9 +376,6 @@ Created by Scott Russo.
   function msFromWPM(wpm){ wpm = Math.max(1, Number(wpm)||120); return Math.round(60000 / wpm); }
   function wpmFromMs(ms){ ms = Math.max(1, Number(ms)||250); return Math.max(1, Math.round(60000 / ms)); }
 
-  wpmNum.oninput   = ()=>{ const w = Math.max(20, Math.min(300, Number(wpmNum.value||120))); wpmNum.value=String(w); gapMsNum.value=String(msFromWPM(w)); };
-  gapMsNum.oninput = ()=>{ const g = Math.max(0, Math.min(2000, Number(gapMsNum.value||250))); gapMsNum.value=String(g); wpmNum.value=String(wpmFromMs(g)); };
-
   async function playWordToken(tok){
     const g = App.groups.find(x=>x.id===tok.gid);
     const p = g ? g.pads[tok.idx] : null;
@@ -376,12 +387,7 @@ Created by Scott Russo.
       triggerRetrigger(p, 1.0);
       return new Promise(res=>{ currentTimeout = setTimeout(res, durMs + Number(gapMsNum.value||250)); });
     }else if (useTTS){
-      const utt = new SpeechSynthesisUtterance(spoken);
-      utt.rate = 1.0; utt.pitch = 1.0;
-      return new Promise(res=>{
-        utt.onend = ()=> setTimeout(res, Number(gapMsNum.value||250));
-        try{ window.speechSynthesis.speak(utt); }catch(_){ setTimeout(res, 250); }
-      });
+      return ttsSpeak(spoken, Number(gapMsNum.value||250));
     }else{
       return new Promise(res=>{ currentTimeout = setTimeout(res, Number(gapMsNum.value||250)); });
     }
@@ -428,6 +434,7 @@ Created by Scott Russo.
     const g = App.groups.find(x=>x.id===gid); if (!g) return;
     const p = g.pads[idx]; if (!p) return;
 
+    // Play or record
     if (p.mode===PadMode.RETRIGGER) triggerRetrigger(p, vel);
     else if (p.mode===PadMode.TOGGLE_START) togglePad(p, false);
     else if (p.mode===PadMode.TOGGLE_RESUME) togglePad(p, true);
@@ -435,6 +442,13 @@ Created by Scott Russo.
       const st = padRecorders.get(p); if (st && st.active) stopPadRecording(p, gid, idx); else startPadRecording(p, gid, idx);
     }
 
+    // NEW: If no sample and TTS fallback is enabled, speak immediately on pad press
+    if ((!p.buffer) && ttsFallbackChk && ttsFallbackChk.checked){
+      const spoken = (p.phrase && p.phrase.trim()) ? p.phrase.trim() : p.name;
+      ttsSpeak(spoken, Number(gapMsNum.value||250));
+    }
+
+    // Compose appends token
     if (composeMode){
       const text = (p.phrase && p.phrase.trim()) ? p.phrase.trim() : p.name;
       App.sentence.push({ gid, idx, name: p.name, text, color: g.color });
@@ -500,7 +514,7 @@ Created by Scott Russo.
         </div>
       `;
 
-      // === Vocabulary → Pad (inline, minimal UI, theme-matched) ===
+      // Vocabulary → Pad picker
       if (Array.isArray(vocab) && vocab.length){
         const controls = row.querySelector('.kit-controls');
         const wrap = document.createElement('div');
@@ -512,7 +526,6 @@ Created by Scott Russo.
 
         const sel = document.createElement('select');
         sel.style.minWidth = '180px';
-        // first option placeholder
         const ph = document.createElement('option');
         ph.value = ''; ph.textContent = 'Pick a word/phrase…';
         sel.appendChild(ph);
@@ -530,9 +543,7 @@ Created by Scott Russo.
           if(!val) return;
           const prevName = p.name;
           p.name = val;
-          // If phrase empty OR matched previous name, sync it to the new name
           if (!p.phrase || p.phrase.trim()==='' || p.phrase===prevName){ p.phrase = val; }
-          // reflect in inputs
           const nameInp = row.querySelector('[data-k="name"]');
           const phrInp  = row.querySelector('[data-k="phrase"]');
           if (nameInp) nameInp.value = p.name;
@@ -546,7 +557,6 @@ Created by Scott Russo.
         wrap.appendChild(useBtn);
         controls.appendChild(wrap);
       }
-      // === end Vocabulary → Pad ===
 
       // Keep phrase synced / default to name on blank
       row.addEventListener('input', (e)=>{
@@ -568,7 +578,6 @@ Created by Scott Russo.
         }
         else { const num = Number(t.value); if (!isNaN(num)) p[k]=num; }
       });
-      // On blur, if phrase left empty, default it to name
       const phraseInput = row.querySelector('[data-k="phrase"]');
       phraseInput.addEventListener('blur', ()=>{
         if (!phraseInput.value.trim()){ p.phrase = p.name; phraseInput.value = p.name; renderSentence(); }
@@ -596,7 +605,6 @@ Created by Scott Russo.
         fr.onload = ()=>{ p.img = fr.result; rebuildEditor(); renderBoards(); };
         fr.readAsDataURL(f);
       };
-      // clear image
       row.querySelector('[data-k="imgclear"]').onclick = ()=>{
         p.img = null; rebuildEditor(); renderBoards();
       };
@@ -608,6 +616,7 @@ Created by Scott Russo.
   /* ========= Stop All ========= */
   stopAllBtn.onclick = ()=>{
     for (const g of App.groups){ for (const p of g.pads){ stopPadVoices(p, true); p.toggleOn=false; p.voice=null; p.savedOffset=0; } }
+    try{ if ('speechSynthesis' in window) window.speechSynthesis.cancel(); }catch(_){}
     stopSentence();
     status('Stopped all');
   };
